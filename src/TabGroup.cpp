@@ -10,7 +10,9 @@
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
-#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
+#include <hyprland/src/desktop/view/types/Geometric.hpp>
 #include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/desktop/view/types/Geometric.hpp>
 #include <hyprland/src/helpers/Color.hpp>
@@ -29,6 +31,7 @@
 #include "log.hpp"
 #include "globals.hpp"
 #include "render.hpp"
+#include "render/Context.hpp"
 #include "render/Renderer.hpp"
 #include "render/pass/PassElement.hpp"
 
@@ -53,6 +56,15 @@ CHyprColor merge_colors(Args... colors) {
 	// conversion to an rgb
 	return CHyprColor(Hyprgraphics::CColor(oklab), alpha);
 }
+
+constexpr std::pair<double, double>
+tab_entry_geometry(double group_width, double padding, bool outer, double offset, double width) {
+	if (outer) return {offset * group_width + padding * 0.5, width * group_width - padding};
+	return {offset * (group_width + padding), width * (group_width + padding) - padding};
+}
+
+static_assert(tab_entry_geometry(100, 20, false, 0.0, 0.25) == std::pair {0.0, 10.0});
+static_assert(tab_entry_geometry(100, 20, false, 0.75, 0.25) == std::pair {90.0, 10.0});
 
 Hy3TabBarEntry::Hy3TabBarEntry(Hy3TabBar& tab_bar, Hy3Node& node): tab_bar(tab_bar), node(&node) {
 	auto& mgr = Animation::mgr();
@@ -185,7 +197,7 @@ bool Hy3TabBarEntry::shouldRemove() {
 	return this->destroying && (this->vertical_pos->value() == 1.0 || this->width->value() == 0.0);
 }
 
-void Hy3TabBarEntry::render(float scale, CBox& box, float opacity_mul) {
+void Hy3TabBarEntry::render(Render::CRenderContext& ctx, float scale, CBox& box, float opacity_mul) {
 	auto opacity = opacity_mul * this->fade_opacity->value();
 
 	// clang-format off
@@ -224,9 +236,10 @@ void Hy3TabBarEntry::render(float scale, CBox& box, float opacity_mul) {
 	box.round();
 
 	// sometimes enabled before our renderer is called
-	Render::GL::g_pHyprOpenGL->scissor(nullptr);
+	Render::GL::g_pHyprOpenGL->scissor(ctx, nullptr);
 
 	Hy3Render::renderTab(
+	    ctx,
 	    box,
 	    opacity * *s_opacity,
 	    *blur,
@@ -236,10 +249,10 @@ void Hy3TabBarEntry::render(float scale, CBox& box, float opacity_mul) {
 	    radius
 	);
 
-	this->renderText(scale, box, opacity);
+	this->renderText(ctx, scale, box, opacity);
 }
 
-void Hy3TabBarEntry::renderText(float scale, CBox& box, float opacity) {
+void Hy3TabBarEntry::renderText(Render::CRenderContext& ctx, float scale, CBox& box, float opacity) {
 	// clang-format off
 	static const auto render_text = CConfigValue<Config::INTEGER>("plugin:hy3:tabs:render_text");
 	static const auto text_center = CConfigValue<Config::INTEGER>("plugin:hy3:tabs:text_center");
@@ -366,7 +379,7 @@ void Hy3TabBarEntry::renderText(float scale, CBox& box, float opacity) {
 	glBlendFunc(GL_CONSTANT_COLOR, GL_ONE_MINUS_SRC_ALPHA);
 	glBlendColor(c.r, c.g, c.b, c.a);
 
-	Render::GL::g_pHyprOpenGL->renderTexture(this->texture, texture_box, { .a = opacity });
+	Render::GL::g_pHyprOpenGL->renderTexture(ctx, this->texture, texture_box, { .a = opacity });
 
 	glBlendColor(1, 1, 1, 1);
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
@@ -724,8 +737,8 @@ void Hy3TabGroup::tick() {
 	}
 }
 
-std::pair<CBox, CBox> Hy3TabGroup::getRenderBB() const {
-	auto* monitor = g_pHyprRenderer->m_renderData.pMonitor.get();
+std::pair<CBox, CBox> Hy3TabGroup::getRenderBB(Render::CRenderContext& ctx) const {
+	auto* monitor = ctx.m_data.pMonitor.get();
 	auto scale = monitor->m_scale;
 
 	auto pos = this->pos->value() - monitor->m_position;
@@ -741,14 +754,17 @@ std::pair<CBox, CBox> Hy3TabGroup::getRenderBB() const {
 	return std::make_pair(box, scaledBox);
 }
 
-void Hy3TabGroup::renderTabBar() {
+void Hy3TabGroup::renderTabBar(Render::CRenderContext& ctx) {
 	static const auto window_rounding = CConfigValue<Config::INTEGER>("decoration:rounding");
 	static const auto enter_from_top = CConfigValue<Config::INTEGER>("plugin:hy3:tabs:from_top");
 	static const auto padding = CConfigValue<Config::INTEGER>("plugin:hy3:tabs:padding");
+	static const auto padding_horizontal =
+	    CConfigValue<Config::INTEGER>("plugin:hy3:tabs:padding_horizontal");
+	static const auto padding_outer = CConfigValue<Config::INTEGER>("plugin:hy3:tabs:padding_outer");
 
-	auto [box, scaledBox] = this->getRenderBB();
+	auto [box, scaledBox] = this->getRenderBB(ctx);
 
-	auto* monitor = g_pHyprRenderer->m_renderData.pMonitor.get();
+	auto* monitor = ctx.m_data.pMonitor.get();
 	auto scale = monitor->m_scale;
 
 	if (!this->bar.damaged) {
@@ -757,7 +773,7 @@ void Hy3TabGroup::renderTabBar() {
 
 		pixman_region32_intersect_rect(
 		    &damage,
-		    g_pHyprRenderer->m_renderData.damage.pixman(),
+		    ctx.m_data.damage.pixman(),
 		    scaledBox.x,
 		    scaledBox.y,
 		    scaledBox.width,
@@ -785,7 +801,7 @@ void Hy3TabGroup::renderTabBar() {
 	}
 
 	if (render_stencil) {
-		g_pHyprRenderer->m_renderData.currentFB->bind();
+		ctx.m_data.currentFB->bind();
 		glEnable(GL_STENCIL_TEST);
 		glStencilMask(0xff);
 		glClearStencil(0);
@@ -812,7 +828,7 @@ void Hy3TabGroup::renderTabBar() {
 			window_box.scale(scale);
 
 			if (window_box.width > 0 && window_box.height > 0)
-				Render::GL::g_pHyprOpenGL->renderRect(window_box, CHyprColor(0, 0, 0, 0), { .round = radius });
+				Render::GL::g_pHyprOpenGL->renderRect(ctx, window_box, CHyprColor(0, 0, 0, 0), { .round = radius });
 		}
 
 		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -824,15 +840,26 @@ void Hy3TabGroup::renderTabBar() {
 
 	auto fade_opacity = this->bar.fade_opacity->value()
 	                  * (valid(this->workspace) ? this->workspace->m_alpha->value() : 1.0);
+	auto horizontal_padding = *padding_horizontal < 0 ? *padding : *padding_horizontal;
 
 	auto render_entry = [&](Hy3TabBarEntry& entry) {
+		auto [entry_x, entry_width] = tab_entry_geometry(
+		    box.w,
+		    horizontal_padding,
+		    *padding_outer,
+		    entry.offset->value(),
+		    entry.width->value()
+		);
 		Vector2D entry_pos = {
-		    (box.x + (entry.offset->value() * box.w) + (*padding * 0.5)) * scale,
+		    (box.x + entry_x) * scale,
 		    scaledBox.y
 		        + ((entry.vertical_pos->value() * (box.h + *padding) * scale)
 		           * (*enter_from_top ? -1 : 1)),
 		};
-		Vector2D entry_size = {((entry.width->value() * box.w) - *padding) * scale, scaledBox.h};
+		Vector2D entry_size = {
+		    entry_width * scale,
+		    scaledBox.h,
+		};
 		if (entry_size.x < 0 || entry_size.y < 0 || fade_opacity == 0.0) return;
 
 		CBox box = {
@@ -843,7 +870,7 @@ void Hy3TabGroup::renderTabBar() {
 		};
 
 		box.round();
-		entry.render(scale, box, fade_opacity);
+		entry.render(ctx, scale, box, fade_opacity);
 	};
 
 	for (auto& entry: this->bar.entries) {
@@ -865,12 +892,12 @@ void Hy3TabGroup::renderTabBar() {
 	}
 }
 
-std::vector<UP<IPassElement>> Hy3TabPassElement::draw() {
-	this->group->renderTabBar();
+std::vector<UP<IPassElement>> Hy3TabPassElement::draw(Render::CRenderContext& ctx) {
+	this->group->renderTabBar(ctx);
 	return {};
 }
 
-bool Hy3TabPassElement::needsPrecomputeBlur() {
+bool Hy3TabPassElement::needsPrecomputeBlur(Render::CRenderContext& ctx) {
 	// clang-format off
 	static const auto s_opacity = CConfigValue<Config::FLOAT>("plugin:hy3:tabs:opacity");
 	static const auto blur = CConfigValue<Config::INTEGER>("plugin:hy3:tabs:blur");
@@ -896,7 +923,9 @@ bool Hy3TabPassElement::needsPrecomputeBlur() {
 	    || needsblur(col_border_inactive);
 }
 
-std::optional<CBox> Hy3TabPassElement::boundingBox() { return this->group->getRenderBB().first; }
+std::optional<CBox> Hy3TabPassElement::boundingBox(Render::CRenderContext& ctx) {
+	return this->group->getRenderBB(ctx).first;
+}
 
 void findOverlappingWindows(Hy3Node& node, float height, std::vector<PHLWINDOWREF>& windows) {
 	switch (node.type()) {

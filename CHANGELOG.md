@@ -1,5 +1,9 @@
 # Changelog
 
+# hl0.57.0 and before
+
+- Added configurable horizontal tab padding
+
 # hl0.56.0.1 and before
 
 - Fix mouse up+left mouse resize
